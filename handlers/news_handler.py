@@ -23,19 +23,21 @@ def format_event_message(event, local_dt):
     mins = minutes_left % 60
     
     time_remaining_str = f"{hours} Jam {mins} Menit" if hours > 0 else f"{mins} Menit"
+    forecast_val = event.get("forecast") or "-"
+    previous_val = event.get("previous") or "-"
 
     return (
         "🚨 RED FOLDER ALERT 🚨\n\n"
         f"Currency: {event.get(currency, )}\n"
         f"📰 Event: {event.get(title)}\n\n"
         f"🕒 Waktu: {day}, {date_str} - {time_str} WIB\n"
-        f"📊 Forecast: {event.get(forecast, -)}\n"
-        f"📈 Previous: {event.get(previous, -)}\n\n"
+        f"📊 Forecast: {forecast_val}\n"
+        f"📈 Previous: {previous_val}\n\n"
         f"⏳ Sisa waktu: {time_remaining_str}"
     )
 
 async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🔎 Mencari jadwal High Impact News berikutnya via Playwright...")
+    msg = await update.message.reply_text("🔎 Mencari jadwal High Impact News berikutnya...")
     try:
         events = await fetch_calendar(cfg)
         now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -66,9 +68,10 @@ async def cmd_news_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not out:
             await msg.edit_text("ℹ️ Tidak ada High Impact News hari ini.")
             return
-        text = "🚨 **High Impact News Hari Ini:**\n\n"
+        text = "🚨 *High Impact News Hari Ini:*\n\n"
         for local, e in sorted(out):
-            text += f"• **{local.strftime(%H:%M)} WIB** | {e[currency]} - {e[title]}\n"
+            time_formatted = local.strftime("%H:%M")
+            text += f"• *{time_formatted} WIB* | {e[currency]} - {e[title]}\n"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as err:
         logger.exception("Error in cmd_news_today")
