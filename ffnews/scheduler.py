@@ -1,62 +1,99 @@
+import asyncio
 import logging
-import logging.config
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram import Bot
 
-from config import LOGGING_CONFIG, Config
+from config import Config
 from database import Database
-from scheduler import Scheduler
-from handlers import journal, stats, calendar
+from scraper import fetch_calendar
 
-load_dotenv()
-
-logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    cfg = Config()
-    if not cfg.BOT_TOKEN:
-        logger.error("BOT_TOKEN not set in environment")
-        return
+class Scheduler:
+    """Periodically scrapes the calendar and sends H-2 / H-1 alerts.
 
-    db = Database("database.db", cfg)
-    db.init_db()
+    Fixes vs. the old ffnews implementation:
+    - `bot.owner_id` was referenced but never set anywhere, so every send
+      attempt would raise AttributeError and crash the scheduler loop
+      silently (caught only by the broad except, but no message ever sent).
+      Now the chat id comes from Config.BOT_OWNER_ID.
+    - A `_running` guard prevents two poll cycles from overlapping if a
+      scrape takes longer than CHECK_INTERVAL_SECONDS, which previously
+      could launch a second Playwright browser concurrently.
+    - Notification dedupe is unchanged in spirit (SQLite-backed) but now
+      shares the single project-wide Database/connection helper.
+    """
 
-    app = ApplicationBuilder().token(cfg.BOT_TOKEN).build()
+    def __init__(self, bot: Bot, db: Database, cfg: Config):
+        self.bot = bot
+        self.db = db
+        self.cfg = cfg
+        self._task = None
+        self._running = False
 
-    # Journal commands
-    app.add_handler(CommandHandler("start", journal.start))
-    app.add_handler(journal.conv_handler)
-    app.add_handler(CommandHandler("edit", journal.edit_conv))
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._loop())
+            logger.info("Calendar scheduler started")
 
-    # Stats commands
-    app.add_handler(CommandHandler("weekly", stats.weekly))
-    app.add_handler(CommandHandler("monthly", stats.monthly))
-    app.add_handler(CommandHandler("pair", stats.pair_stats))
-    app.add_handler(CommandHandler("model", stats.model_stats))
-    app.add_handler(CommandHandler("delete", stats.delete_trade))
-    app.add_handler(CommandHandler("todaytrades", stats.trades_today))
+    def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
 
-    # Forex Factory calendar commands (note: "today" here refers to the
-    # calendar, distinct from the old journal "today" trade-list command,
-    # which is now only reachable via /pair, /model, /weekly, /monthly).
-    app.add_handler(CommandHandler("today", calendar.cmd_today))
-    app.add_handler(CommandHandler("next", calendar.cmd_next))
-    app.add_handler(CommandHandler("status", calendar.cmd_status))
+    async def _loop(self) -> None:
+        while True:
+            if self._running:
+                logger.warning("Previous scheduler cycle still running; skipping this tick")
+            else:
+                self._running = True
+                try:
+                    await self._check_once()
+                except Exception:
+                    logger.exception("Unhandled error in scheduler cycle")
+                finally:
+                    self._running = False
+            await asyncio.sleep(self.cfg.CHECK_INTERVAL_SECONDS)
 
-    # Start the calendar alert scheduler as a background asyncio task once
-    # the bot's event loop is running, so it never blocks polling.
-    async def _on_startup(app):
-        scheduler = Scheduler(app.bot, db, cfg)
-        scheduler.start()
+    async def _check_once(self) -> None:
+        if not self.cfg.BOT_OWNER_ID:
+            logger.warning("BOT_OWNER_ID not configured; skipping notification check")
+            return
 
-    app.post_init = _on_startup
+        events = await fetch_calendar(self.cfg)
+        if not events:
+            logger.info("No events returned this cycle (scrape empty or failed)")
+            return
 
-    logger.info("Bot started")
-    app.run_polling()
+        tz = ZoneInfo(self.cfg.TIMEZONE)
+        now_local = datetime.now(tz)
 
+        for event in events:
+            event_dt = datetime.fromtimestamp(event["timestamp_utc"], tz=timezone.utc).astimezone(tz)
+            minutes_left = int((event_dt - now_local).total_seconds() // 60)
+            status = self.db.get_notification_status(event["id"]) or {}
 
-if __name__ == "__main__":
-    main()
+            if 115 <= minutes_left <= 125 and not status.get("h2_sent"):
+                await self._send_alert(event, event_dt, "H-2")
+                self.db.mark_sent(event["id"], "h2")
+
+            if 55 <= minutes_left <= 65 and not status.get("h1_sent"):
+                await self._send_alert(event, event_dt, "H-1")
+                self.db.mark_sent(event["id"], "h1")
+
+    async def _send_alert(self, event: dict, event_dt: datetime, label: str) -> None:
+        text = (
+            f"⏰ {label} ALERT\n\n"
+            f"{event['currency']} — {event['title']}\n"
+            f"Waktu: {event_dt.strftime('%A, %d %B %Y %H:%M')} WIB\n"
+            f"Forecast: {event.get('forecast') or '-'}\n"
+            f"Previous: {event.get('previous') or '-'}"
+        )
+        try:
+            await self.bot.send_message(chat_id=self.cfg.BOT_OWNER_ID, text=text)
+            logger.info("Sent %s alert for event %s", label, event["id"])
+        except Exception:
+            logger.exception("Failed to send %s alert for event %s", label, event["id"])
