@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
 from config import LOGGING_CONFIG, Config
 from database import Database
-from handlers import journal, stats
+from handlers import journal, stats, news_handler
 
 load_dotenv()
 
@@ -33,6 +33,10 @@ def main() -> None:
     app.add_handler(CommandHandler("today", stats.today))
     app.add_handler(CommandHandler("delete", stats.delete_trade))
     app.add_handler(CommandHandler("edit", journal.edit_conv))
+
+    # ForexFactory News commands (Playwright scraper)
+    app.add_handler(CommandHandler("next", news_handler.cmd_next))
+    app.add_handler(CommandHandler("news", news_handler.cmd_news_today))
 
     logger.info("Bot started")
     app.run_polling()
