@@ -1,62 +1,99 @@
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from news import fetch_calendar, to_local
-from database import Database
+
 from telegram import Bot
-from config import cfg
+
+from config import Config
+from database import Database
+from scraper import fetch_calendar
 
 logger = logging.getLogger(__name__)
-db = Database("ffnews.db")
 
 
 class Scheduler:
-    def __init__(self, bot: Bot):
+    """Periodically scrapes the calendar and sends H-2 / H-1 alerts.
+
+    Fixes vs. the old ffnews implementation:
+    - `bot.owner_id` was referenced but never set anywhere, so every send
+      attempt would raise AttributeError and crash the scheduler loop
+      silently (caught only by the broad except, but no message ever sent).
+      Now the chat id comes from Config.BOT_OWNER_ID.
+    - A `_running` guard prevents two poll cycles from overlapping if a
+      scrape takes longer than CHECK_INTERVAL_SECONDS, which previously
+      could launch a second Playwright browser concurrently.
+    - Notification dedupe is unchanged in spirit (SQLite-backed) but now
+      shares the single project-wide Database/connection helper.
+    """
+
+    def __init__(self, bot: Bot, db: Database, cfg: Config):
         self.bot = bot
+        self.db = db
+        self.cfg = cfg
         self._task = None
+        self._running = False
 
-    async def _run(self):
-        tz = ZoneInfo(cfg.TIMEZONE)
-        while True:
-            try:
-                events = fetch_calendar()
-                now_local = datetime.now(tz)
-                now_ts = int(datetime.now(timezone.utc).timestamp())
-                for e in events:
-                    # only high impact
-                    impact = e.get("impact", "").lower()
-                    if not (impact == "high" or "red" in impact):
-                        continue
-                    currency = e.get("currency", "").upper()
-                    if currency not in ("USD", "AUD"):
-                        continue
-
-                    ev_ts = int(e.get("timestamp_utc"))
-                    ev_local = to_local(ev_ts)
-                    delta = ev_local - now_local
-                    minutes = int(delta.total_seconds() // 60)
-
-                    # thresholds: ±5 minutes window around 120 and 60 minutes
-                    status = db.get_status(e["id"]) or {}
-                    # H-2
-                    if 115 <= minutes <= 125 and not status.get("h2_sent"):
-                        text = f"[AUTO] H-2: {e.get('currency')} {e.get('title')} at {ev_local.strftime('%Y-%m-%d %H:%M')}"
-                        await self.bot.send_message(chat_id=self.bot.owner_id, text=text)
-                        db.mark_sent(e["id"], "h2")
-                        logger.info("Sent H-2 for %s", e["id"])
-
-                    # H-1
-                    if 55 <= minutes <= 65 and not status.get("h1_sent"):
-                        text = f"[AUTO] H-1: {e.get('currency')} {e.get('title')} at {ev_local.strftime('%Y-%m-%d %H:%M')}"
-                        await self.bot.send_message(chat_id=self.bot.owner_id, text=text)
-                        db.mark_sent(e["id"], "h1")
-                        logger.info("Sent H-1 for %s", e["id"])
-
-            except Exception:
-                logger.exception("Error in scheduler loop")
-            await asyncio.sleep(cfg.CHECK_INTERVAL_SECONDS)
-
-    def start(self):
+    def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.create_task(self._run())
+            self._task = asyncio.create_task(self._loop())
+            logger.info("Calendar scheduler started")
+
+    def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    async def _loop(self) -> None:
+        while True:
+            if self._running:
+                logger.warning("Previous scheduler cycle still running; skipping this tick")
+            else:
+                self._running = True
+                try:
+                    await self._check_once()
+                except Exception:
+                    logger.exception("Unhandled error in scheduler cycle")
+                finally:
+                    self._running = False
+            await asyncio.sleep(self.cfg.CHECK_INTERVAL_SECONDS)
+
+    async def _check_once(self) -> None:
+        if not self.cfg.BOT_OWNER_ID:
+            logger.warning("BOT_OWNER_ID not configured; skipping notification check")
+            return
+
+        events = await fetch_calendar(self.cfg)
+        if not events:
+            logger.info("No events returned this cycle (scrape empty or failed)")
+            return
+
+        tz = ZoneInfo(self.cfg.TIMEZONE)
+        now_local = datetime.now(tz)
+
+        for event in events:
+            event_dt = datetime.fromtimestamp(event["timestamp_utc"], tz=timezone.utc).astimezone(tz)
+            minutes_left = int((event_dt - now_local).total_seconds() // 60)
+            status = self.db.get_notification_status(event["id"]) or {}
+
+            if 115 <= minutes_left <= 125 and not status.get("h2_sent"):
+                await self._send_alert(event, event_dt, "H-2")
+                self.db.mark_sent(event["id"], "h2")
+
+            if 55 <= minutes_left <= 65 and not status.get("h1_sent"):
+                await self._send_alert(event, event_dt, "H-1")
+                self.db.mark_sent(event["id"], "h1")
+
+    async def _send_alert(self, event: dict, event_dt: datetime, label: str) -> None:
+        text = (
+            f"⏰ {label} ALERT\n\n"
+            f"{event['currency']} — {event['title']}\n"
+            f"Waktu: {event_dt.strftime('%A, %d %B %Y %H:%M')} WIB\n"
+            f"Forecast: {event.get('forecast') or '-'}\n"
+            f"Previous: {event.get('previous') or '-'}"
+        )
+        try:
+            await self.bot.send_message(chat_id=self.cfg.BOT_OWNER_ID, text=text)
+            logger.info("Sent %s alert for event %s", label, event["id"])
+        except Exception:
+            logger.exception("Failed to send %s alert for event %s", label, event["id"])
