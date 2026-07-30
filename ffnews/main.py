@@ -33,8 +33,7 @@ def main():
     # Start scheduler as background task after app starts
     async def _start_scheduler(app):
         bot = app.bot
-        # store owner id on bot for sending; assume BOT_OWNER env or use first chat
-        bot.owner_id = int(__import__("os").environ.get("BOT_OWNER", "0"))
+        # store owner id on bot for sending; assume
         sched = Scheduler(bot)
         sched.start()
 
