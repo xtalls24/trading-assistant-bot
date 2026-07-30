@@ -1,3 +1,4 @@
+"""
 Forex Factory calendar scraper.
 
 Replaces the old JSON-endpoint client (ffnews/news.py) which was rate-limited.
