@@ -1,3 +1,4 @@
+import logging.config
 import logging
 import asyncio
 from dotenv import load_dotenv
