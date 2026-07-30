@@ -1,45 +1,60 @@
 import logging
-import asyncio
+import logging.config
+
 from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CommandHandler
-from config import cfg
+
+from config import LOGGING_CONFIG, Config
 from database import Database
-from telegram_handler import cmd_today, cmd_tomorrow, cmd_week, cmd_next, cmd_status
 from scheduler import Scheduler
-from telegram import Bot
+from handlers import journal, stats, calendar
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main() -> None:
+    cfg = Config()
     if not cfg.BOT_TOKEN:
         logger.error("BOT_TOKEN not set in environment")
         return
 
-    db = Database("ffnews.db")
+    db = Database("database.db", cfg)
     db.init_db()
 
     app = ApplicationBuilder().token(cfg.BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
-    app.add_handler(CommandHandler("week", cmd_week))
-    app.add_handler(CommandHandler("next", cmd_next))
-    app.add_handler(CommandHandler("status", cmd_status))
+    # Journal commands
+    app.add_handler(CommandHandler("start", journal.start))
+    app.add_handler(journal.conv_handler)
+    app.add_handler(CommandHandler("edit", journal.edit_conv))
 
-    # Start scheduler as background task after app starts
-    async def _start_scheduler(app):
-        bot = app.bot
-        # store owner id on bot for sending; assume
-        sched = Scheduler(bot)
-        sched.start()
+    # Stats commands
+    app.add_handler(CommandHandler("weekly", stats.weekly))
+    app.add_handler(CommandHandler("monthly", stats.monthly))
+    app.add_handler(CommandHandler("pair", stats.pair_stats))
+    app.add_handler(CommandHandler("model", stats.model_stats))
+    app.add_handler(CommandHandler("delete", stats.delete_trade))
+    app.add_handler(CommandHandler("todaytrades", stats.trades_today))
 
-    app.post_init = _start_scheduler
+    # Forex Factory calendar commands (note: "today" here refers to the
+    # calendar, distinct from the old journal "today" trade-list command,
+    # which is now only reachable via /pair, /model, /weekly, /monthly).
+    app.add_handler(CommandHandler("today", calendar.cmd_today))
+    app.add_handler(CommandHandler("next", calendar.cmd_next))
+    app.add_handler(CommandHandler("status", calendar.cmd_status))
 
-    logger.info("Starting FF News Bot")
+    # Start the calendar alert scheduler as a background asyncio task once
+    # the bot's event loop is running, so it never blocks polling.
+    async def _on_startup(app):
+        scheduler = Scheduler(app.bot, db, cfg)
+        scheduler.start()
+
+    app.post_init = _on_startup
+
+    logger.info("Bot started")
     app.run_polling()
 
 
