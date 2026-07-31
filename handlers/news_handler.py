@@ -28,8 +28,8 @@ def format_event_message(event, local_dt):
 
     return (
         "🚨 RED FOLDER ALERT 🚨\n\n"
-        f"Currency: {event.get(currency, )}\n"
-        f"📰 Event: {event.get(title)}\n\n"
+        f"Currency: {event.get('currency', '')}\n"
+        f"📰 Event: {event.get('title', '')}\n\n"
         f"🕒 Waktu: {day}, {date_str} - {time_str} WIB\n"
         f"📊 Forecast: {forecast_val}\n"
         f"📈 Previous: {previous_val}\n\n"
@@ -71,7 +71,7 @@ async def cmd_news_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "🚨 *High Impact News Hari Ini:*\n\n"
         for local, e in sorted(out):
             time_formatted = local.strftime("%H:%M")
-            text += f"• *{time_formatted} WIB* | {e[currency]} - {e[title]}\n"
+            text += f"• *{time_formatted} WIB* | {e['currency']} - {e['title']}\n"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as err:
         logger.exception("Error in cmd_news_today")
