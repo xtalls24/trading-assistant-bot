@@ -4,9 +4,9 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Currency pairs matching pattern (Explicit common pairs or valid symbol formats)
+# Currency pairs matching pattern (Explicit common pairs or valid symbol formats, with optional slash)
 PAIR_PATTERN = re.compile(
-    r"\b(EURUSD|GBPUSD|AUDUSD|USDCAD|USDJPY|USDCHF|NZDUSD|EURGBP|EURJPY|GBPJPY|AUDJPY|EURAUD|GBPAUD|AUDCAD|AUDNZD|CADJPY|CHFJPY|EURAUD|EURCAD|EURCHF|EURNZD|GBPCAD|GBPCHF|GBPNZD|NZDCAD|NZDCHF|NZDJPY|XAUUSD|XAGUSD|BTCUSD|ETHUSD)\b",
+    r"\b(EUR/?USD|GBP/?USD|AUD/?USD|USD/?CAD|USD/?JPY|USD/?CHF|NZD/?USD|EUR/?GBP|EUR/?JPY|GBP/?JPY|AUD/?JPY|EUR/?AUD|GBP/?AUD|AUD/?CAD|AUD/?NZD|CAD/?JPY|CHF/?JPY|EUR/?CAD|EUR/?CHF|EUR/?NZD|GBP/?CAD|GBP/?CHF|GBP/?NZD|NZD/?CAD|NZD/?CHF|NZD/?JPY|XAU/?USD|GOLD|XAG/?USD|BTC/?USD|ETH/?USD)\b",
     re.IGNORECASE,
 )
 
@@ -18,50 +18,67 @@ ENTRY_PATTERN = re.compile(r"(?i)(?:entry|ep|open|\bat\b)\s*[:=\-]?\s*(\d+(?:\.\
 SL_PATTERN = re.compile(r"(?i)(?:sl|stop|stop\s*loss)\s*[:=\-]?\s*(\d+(?:\.\d+)?)")
 TP_PATTERN = re.compile(r"(?i)(?:tp|target|take\s*profit)\s*[:=\-]?\s*(\d+(?:\.\d+)?)")
 RISK_PATTERN = re.compile(r"(?i)(?:risk|risk\s*amount)\s*[:=\-]?\s*(\d+(?:\.\d+)?\s*(?:%|\$|R)?)")
-RR_PATTERN = re.compile(r"(?i)(?:rr|r:r|risk\s*reward)\s*[:=\-]?\s*1?\s*[:/]?\s*(\d+(?:\.\d+)?)")
-MODEL_PATTERN = re.compile(r"(?i)\b(C1|C2|C3|SETUP\s*[A-C]|MODEL\s*[1-3])\b")
+RR_PATTERN = re.compile(r"(?i)(?:risk[/:\-]reward|r[:/]r|planned\s*rr|rr)\s*[:=\-]?\s*(?:1\s*[:/]\s*)?(\d+(?:\.\d+)?)", re.IGNORECASE)
+MODEL_PATTERN = re.compile(r"(?i)(?:trading\s*model|model|setup|strategy)\s*[:=\-]?\s*([a-z0-9_\-\s]+)", re.IGNORECASE)
+MODEL_SHORT_PATTERN = re.compile(r"(?i)\b(C1|C2|C3|SETUP\s*[A-Z0-9]+|MODEL\s*[A-Z0-9]+)\b")
 
-# Trade Result reply pattern (e.g., "TP +3R", "SL -1R", "BE", "TP +2.5R", "SL", "TP", "+3R", "-1R")
+# Result & Realized R extraction patterns
+RESULT_KEYWORD_PATTERN = re.compile(r"(?i)(?:final\s*result|outcome|result|status)\s*[:=\-]?\s*(TP|SL|BE|WIN|LOSS|BREAKEVEN)", re.IGNORECASE)
+REALIZED_R_PATTERN = re.compile(r"(?i)(?:realized\s*r|realized|pnl|actual\s*r)\s*[:=\-]?\s*([+-]?\d+(?:\.\d+)?)", re.IGNORECASE)
+R_STANDALONE_PATTERN = re.compile(r"([+-]\d+(?:\.\d+)?)\s*R\b", re.IGNORECASE)
+
+# Standalone result reply pattern (e.g., "TP +3R", "SL -1R", "BE", "+3R")
 RESULT_REPLY_PATTERN = re.compile(
     r"(?i)^\s*(TP|SL|BE|WIN|LOSS|BREAKEVEN)?\s*([+-]?\d+(?:\.\d+)?)?\s*R?\s*$"
 )
-
 SIMPLE_R_PATTERN = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)R\s*$", re.IGNORECASE)
 
 
 def parse_trade_journal(text: str) -> Optional[Dict[str, Any]]:
     """
-    Parses a BEFORE TRADE message post.
-    Returns a dict with parsed fields if a valid trade post is detected, else None.
+    Parses a single trade journal post (finished trade or open trade setup).
+    Returns a dict with all extracted trade details and result status, or None.
     """
     if not text:
         return None
 
-    # Check for Pair and Direction (Mandatory for a valid auto-detected trade)
+    # Check for Pair and Direction
     pair_match = PAIR_PATTERN.search(text)
     direction_match = DIRECTION_PATTERN.search(text)
 
-    # Must contain pair & direction OR explicitly mention BEFORE TRADE / JOURNAL / TRADE
     is_journal_keyword = bool(
         re.search(
-            r"(?i)\b(BEFORE\s*TRADE|JOURNAL|NEW\s*TRADE|TRADE\s*SETUP|ANALYSIS)\b",
+            r"(?i)\b(BEFORE|AFTER|JOURNAL|TRADE|SETUP|ANALYSIS|ENTRY|RESULT|MODEL|PAIR)\b",
             text,
         )
     )
 
-    if not (pair_match and direction_match) and not is_journal_keyword:
+    if not (pair_match or direction_match or is_journal_keyword):
         return None
 
-    # Ignore text if it looks purely like a result reply (e.g., TP +3R, BE)
-    if parse_trade_result(text) and not pair_match:
-        return None
+    raw_pair = pair_match.group(1).upper().replace("/", "") if pair_match else "UNKNOWN"
+    pair = "XAUUSD" if raw_pair == "GOLD" else raw_pair
 
-    pair = pair_match.group(1).upper() if pair_match else "UNKNOWN"
-    direction = direction_match.group(1).upper() if direction_match else "BUY"
-    if direction in ("LONG", "BUY"):
-        direction = "BUY"
-    elif direction in ("SHORT", "SELL"):
-        direction = "SELL"
+    direction = "BUY"
+    if direction_match:
+        dir_str = direction_match.group(1).upper()
+        if dir_str in ("SHORT", "SELL"):
+            direction = "SELL"
+        else:
+            direction = "BUY"
+
+    # Extract model
+    model = "SETUP"
+    model_match = MODEL_PATTERN.search(text)
+    if model_match:
+        # Extract first line/word of model value
+        model_val = model_match.group(1).strip().split("\n")[0].strip().upper()
+        if model_val:
+            model = model_val
+    else:
+        model_short = MODEL_SHORT_PATTERN.search(text)
+        if model_short:
+            model = model_short.group(1).upper()
 
     # Extract optional numerical entry parameters
     entry_match = ENTRY_PATTERN.search(text)
@@ -69,21 +86,74 @@ def parse_trade_journal(text: str) -> Optional[Dict[str, Any]]:
     tp_match = TP_PATTERN.search(text)
     risk_match = RISK_PATTERN.search(text)
     rr_match = RR_PATTERN.search(text)
-    model_match = MODEL_PATTERN.search(text)
 
     entry_price = float(entry_match.group(1)) if entry_match else None
     stop_loss = float(sl_match.group(1)) if sl_match else None
     take_profit = float(tp_match.group(1)) if tp_match else None
     risk_input = risk_match.group(1) if risk_match else None
     planned_rr = float(rr_match.group(1)) if rr_match else None
-    model = model_match.group(1).upper() if model_match else "SETUP"
 
-    # Calculate planned RR automatically if Entry, SL, and TP are present
     if planned_rr is None and entry_price and stop_loss and take_profit:
         risk_dist = abs(entry_price - stop_loss)
         reward_dist = abs(take_profit - entry_price)
         if risk_dist > 0:
             planned_rr = round(reward_dist / risk_dist, 2)
+
+    # Extract Result & Realized R
+    res_match = RESULT_KEYWORD_PATTERN.search(text)
+    realized_r_match = REALIZED_R_PATTERN.search(text)
+    r_standalone_match = R_STANDALONE_PATTERN.search(text)
+
+    result = None
+    actual_r = None
+
+    if res_match:
+        res_str = res_match.group(1).upper()
+        if res_str in ("TP", "WIN"):
+            result = "TP"
+        elif res_str in ("SL", "LOSS"):
+            result = "SL"
+        elif res_str in ("BE", "BREAKEVEN"):
+            result = "BE"
+
+    if realized_r_match:
+        try:
+            actual_r = float(realized_r_match.group(1))
+        except ValueError:
+            pass
+    elif r_standalone_match:
+        try:
+            actual_r = float(r_standalone_match.group(1))
+        except ValueError:
+            pass
+
+    # Fallback result lookup from general text if not matched by explicit key
+    if not result:
+        if re.search(r"(?i)\b(TP|TAKE\s*PROFIT|WIN)\b", text) and re.search(r"(?i)\b(RESULT|OUTCOME|FINAL|STATUS)\b", text):
+            result = "TP"
+        elif re.search(r"(?i)\b(SL|STOP\s*LOSS|LOSS)\b", text) and re.search(r"(?i)\b(RESULT|OUTCOME|FINAL|STATUS)\b", text):
+            result = "SL"
+        elif re.search(r"(?i)\b(BE|BREAKEVEN)\b", text) and re.search(r"(?i)\b(RESULT|OUTCOME|FINAL|STATUS)\b", text):
+            result = "BE"
+
+    # Synchronize result and actual_r defaults
+    if actual_r is not None and result is None:
+        if actual_r > 0:
+            result = "TP"
+        elif actual_r < 0:
+            result = "SL"
+        else:
+            result = "BE"
+
+    if result is not None and actual_r is None:
+        if result == "TP":
+            actual_r = planned_rr or 2.0
+        elif result == "SL":
+            actual_r = -1.0
+        elif result == "BE":
+            actual_r = 0.0
+
+    status = "CLOSED" if result is not None else "OPEN"
 
     return {
         "pair": pair,
@@ -95,6 +165,9 @@ def parse_trade_journal(text: str) -> Optional[Dict[str, Any]]:
         "planned_rr": planned_rr or 2.0,
         "model": model,
         "notes": text.strip(),
+        "status": status,
+        "result": result,
+        "actual_r": actual_r,
     }
 
 
@@ -152,7 +225,6 @@ def parse_trade_result(text: str) -> Optional[Dict[str, Any]]:
                 actual_r = -actual_r
             return {"result": "SL", "actual_r": actual_r}
 
-        # If res_type is None but r_val_str is present
         if r_val_str:
             val = float(r_val_str)
             if val > 0:
@@ -163,3 +235,4 @@ def parse_trade_result(text: str) -> Optional[Dict[str, Any]]:
                 return {"result": "BE", "actual_r": 0.0}
 
     return None
+
