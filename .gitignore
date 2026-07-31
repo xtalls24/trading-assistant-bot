@@ -61,3 +61,4 @@ celerybeat-schedule
 
 # Mac
 .DS_Store
+*.db

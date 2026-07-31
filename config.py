@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -28,6 +27,7 @@ def _parse_currencies(raw: str) -> List[str]:
 class Config:
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
     BOT_OWNER_ID: str = os.getenv("BOT_OWNER_ID", "")
+    TARGET_CHAT_ID: str = os.getenv("TARGET_CHAT_ID", os.getenv("BOT_OWNER_ID", ""))
     CALENDAR_URL: str = "https://www.forexfactory.com/calendar"
     WATCHED_CURRENCIES: List[str] = field(
         default_factory=lambda: _parse_currencies(
@@ -37,3 +37,4 @@ class Config:
     TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Jakarta")
     CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
     SCRAPE_TIMEOUT_MS: int = int(os.getenv("SCRAPE_TIMEOUT_MS", "30000"))
+    DB_PATH: str = os.getenv("DB_PATH", "database.db")
