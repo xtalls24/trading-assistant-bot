@@ -38,11 +38,14 @@ def main() -> None:
     db = Database(cfg.DB_PATH, cfg)
     db.init_db()
 
-    app = ApplicationBuilder().token(cfg.BOT_TOKEN).build()
+    scheduler = NewsScheduler(None, cfg, db)
 
-    # Initialize and start APScheduler background tasks
-    scheduler = NewsScheduler(app, cfg, db)
-    scheduler.start()
+    async def post_init(application) -> None:
+        scheduler.app = application
+        scheduler.start()
+        logger.info("APScheduler started post-init.")
+
+    app = ApplicationBuilder().token(cfg.BOT_TOKEN).post_init(post_init).build()
 
     # Global Error Handler
     app.add_error_handler(error_handler)

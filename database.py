@@ -59,7 +59,7 @@ class Database:
                 r["name"] for r in c.execute("PRAGMA table_info(trades)").fetchall()
             ]
             columns_to_add = {
-                "trade_code": "TEXT UNIQUE",
+                "trade_code": "TEXT",
                 "chat_id": "INTEGER",
                 "message_id": "INTEGER",
                 "bot_reply_message_id": "INTEGER",
