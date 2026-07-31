@@ -11,12 +11,38 @@ cfg = Config()
 db = Database(cfg.DB_PATH, cfg)
 
 
+def is_owner_or_authorized(update: Update, cfg: Config) -> bool:
+    """
+    Checks if the message sender or channel post author is authorized.
+    If BOT_OWNER_ID is set, verifies that user.id matches BOT_OWNER_ID.
+    """
+    if not cfg.BOT_OWNER_ID:
+        return True
+
+    user = update.effective_user
+    if user and str(user.id) == str(cfg.BOT_OWNER_ID):
+        return True
+
+    # Check if message is sent from channel/chat where BOT_OWNER_ID or TARGET_CHAT_ID is matching
+    message = update.effective_message
+    if message and message.from_user and str(message.from_user.id) == str(cfg.BOT_OWNER_ID):
+        return True
+
+    return False
+
+
 async def handle_auto_journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Auto-detects BEFORE TRADE journal entries or trade result replies.
+    Guarded to allow auto-recording and updates only from authorized user/owner.
     """
     message = update.effective_message
     if not message:
+        return
+
+    # Owner Security Guard Check
+    if not is_owner_or_authorized(update, cfg):
+        logger.info(f"Ignored message from unauthorized user ID: {update.effective_user.id if update.effective_user else 'Channel'}")
         return
 
     text = message.text or message.caption or ""
@@ -105,3 +131,43 @@ async def handle_auto_journal(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "INSERT OR REPLACE INTO message_mappings (chat_id, message_id, trade_id) VALUES (?,?,?)",
                 (chat_id, sent_msg.message_id, trade_id),
             )
+
+
+async def handle_edited_journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles edited messages: if an open journal entry post is edited, update journal data.
+    """
+    message = update.edited_message or update.edited_channel_post
+    if not message or not is_owner_or_authorized(update, cfg):
+        return
+
+    chat_id = message.chat_id
+    message_id = message.message_id
+    text = message.text or message.caption or ""
+
+    trade = db.get_trade_by_message(chat_id, message_id)
+    if trade:
+        trade_data = parse_trade_journal(text)
+        if trade_data:
+            with db.conn() as c:
+                c.execute(
+                    """
+                    UPDATE trades
+                    SET pair=?, direction=?, entry_price=?, stop_loss=?, take_profit=?,
+                        risk_input=?, planned_rr=?, model=?, notes=?
+                    WHERE id=?
+                    """,
+                    (
+                        trade_data["pair"],
+                        trade_data["direction"],
+                        trade_data.get("entry_price"),
+                        trade_data.get("stop_loss"),
+                        trade_data.get("take_profit"),
+                        trade_data.get("risk_input"),
+                        trade_data.get("planned_rr"),
+                        trade_data.get("model"),
+                        trade_data.get("notes"),
+                        trade["id"],
+                    ),
+                )
+            logger.info(f"Trade {trade['id']} updated via edited message.")

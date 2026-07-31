@@ -14,7 +14,7 @@ from telegram.ext import (
 from config import LOGGING_CONFIG, Config
 from database import Database
 from scheduler import NewsScheduler
-from handlers.journal_handler import handle_auto_journal
+from handlers.journal_handler import handle_auto_journal, handle_edited_journal
 from handlers import news_handler, stats
 from handlers.menu_handler import cmd_start_menu, handle_menu_callback
 
@@ -73,6 +73,14 @@ def main() -> None:
 
     # Menu Callback Query Handler
     app.add_handler(CallbackQueryHandler(handle_menu_callback))
+
+    # Edited Post/Message Handler
+    app.add_handler(
+        MessageHandler(
+            (filters.UpdateType.EDITED_MESSAGE | filters.UpdateType.EDITED_CHANNEL_POST),
+            handle_edited_journal,
+        )
+    )
 
     # Auto-detection Message Handler (Captures text or photo posts & replies)
     app.add_handler(
