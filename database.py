@@ -272,6 +272,34 @@ class Database:
             cur = c.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY id DESC")
             return [dict(r) for r in cur.fetchall()]
 
+    def get_latest_open_trade(
+        self, chat_id: int, pair: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        with self.conn() as c:
+            if pair and pair != "UNKNOWN":
+                cur = c.execute(
+                    """
+                    SELECT * FROM trades
+                    WHERE chat_id = ? AND pair = ? AND status = 'OPEN'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (chat_id, pair),
+                )
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+
+            cur = c.execute(
+                """
+                SELECT * FROM trades
+                WHERE chat_id = ? AND status = 'OPEN'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (chat_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
     def get_recent_trades(self, limit: int = 10) -> List[Dict[str, Any]]:
         with self.conn() as c:
             cur = c.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))

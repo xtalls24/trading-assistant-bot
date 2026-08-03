@@ -82,10 +82,10 @@ def main() -> None:
         )
     )
 
-    # Auto-detection Message Handler (Captures text or photo posts & replies)
+    # Auto-detection Message Handler (Captures text or photo posts in chats & channel posts)
     app.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+            (filters.TEXT | filters.PHOTO | filters.ChatType.CHANNEL) & ~filters.COMMAND,
             handle_auto_journal,
         )
     )

@@ -18,8 +18,8 @@ ENTRY_PATTERN = re.compile(r"(?i)(?:entry|ep|open|\bat\b)\s*[:=\-]?\s*(\d+(?:\.\
 SL_PATTERN = re.compile(r"(?i)(?:sl|stop|stop\s*loss)\s*[:=\-]?\s*(\d+(?:\.\d+)?)")
 TP_PATTERN = re.compile(r"(?i)(?:tp|target|take\s*profit)\s*[:=\-]?\s*(\d+(?:\.\d+)?)")
 RISK_PATTERN = re.compile(r"(?i)(?:risk|risk\s*amount)\s*[:=\-]?\s*(\d+(?:\.\d+)?\s*(?:%|\$|R)?)")
-RR_PATTERN = re.compile(r"(?i)(?:risk[/:\-]reward|r[:/]r|planned\s*rr|rr)\s*[:=\-]?\s*(?:1\s*[:/]\s*)?(\d+(?:\.\d+)?)", re.IGNORECASE)
-MODEL_PATTERN = re.compile(r"(?i)(?:trading\s*model|model|setup|strategy)\s*[:=\-]?\s*([a-z0-9_\-\s]+)", re.IGNORECASE)
+RR_PATTERN = re.compile(r"(?i)(?:risk[/:\-]reward|r[:/]r|planned\s*rr|\brr\b)\s*[:=\-]?\s*(?:1\s*[:/]\s*)?(\d+(?:\.\d+)?)", re.IGNORECASE)
+MODEL_PATTERN = re.compile(r"(?i)(?:method|trading\s*model|model|setup|strategy)\s*[:=\-]?\s*([a-z0-9_\-\s]+)", re.IGNORECASE)
 MODEL_SHORT_PATTERN = re.compile(r"(?i)\b(C1|C2|C3|SETUP\s*[A-Z0-9]+|MODEL\s*[A-Z0-9]+)\b")
 
 # Result & Realized R extraction patterns
@@ -126,6 +126,24 @@ def parse_trade_journal(text: str) -> Optional[Dict[str, Any]]:
             actual_r = float(r_standalone_match.group(1))
         except ValueError:
             pass
+    else:
+        # Check for format like "RESULT : TP +2R" or "RESULT: TP 2R"
+        tp_plus_r = re.search(r"(?i)(?:result|outcome|status)\s*[:=\-]?\s*(TP|SL|BE|WIN|LOSS)\s*([+-]?\d+(?:\.\d+)?)?\s*R?", text)
+        if tp_plus_r:
+            res_str = tp_plus_r.group(1).upper()
+            r_str = tp_plus_r.group(2)
+            if res_str in ("TP", "WIN"):
+                result = "TP"
+            elif res_str in ("SL", "LOSS"):
+                result = "SL"
+            elif res_str in ("BE", "BREAKEVEN"):
+                result = "BE"
+
+            if r_str and actual_r is None:
+                try:
+                    actual_r = float(r_str)
+                except ValueError:
+                    pass
 
     # Fallback result lookup from general text if not matched by explicit key
     if not result:
@@ -173,7 +191,8 @@ def parse_trade_journal(text: str) -> Optional[Dict[str, Any]]:
 
 def parse_trade_result(text: str) -> Optional[Dict[str, Any]]:
     """
-    Parses a reply message resolving a trade (e.g. "TP +3R", "SL -1R", "BE", "TP", "SL", "+3.5R").
+    Parses a reply message or outcome update resolving a trade
+    (e.g. "TP +2R", "SL -1R", "BE", "TP", "SL", "+2R", "HIT TP", "RESULT : TP +2R", "EURUSD TP +2R").
     Returns a dict with 'result' (TP/SL/BE) and 'actual_r' (float), or None if not recognized.
     """
     if not text:
@@ -181,58 +200,50 @@ def parse_trade_result(text: str) -> Optional[Dict[str, Any]]:
 
     cleaned = text.strip().upper()
 
-    # 1. Direct keywords
+    # 1. Direct short strings
     if cleaned in ("BE", "BREAKEVEN", "0R", "+0R", "-0R"):
         return {"result": "BE", "actual_r": 0.0}
-    if cleaned in ("TP", "WIN", "TARGET"):
+    if cleaned in ("TP", "WIN", "TARGET", "HIT TP"):
         return {"result": "TP", "actual_r": 2.0}
-    if cleaned in ("SL", "LOSS", "STOP"):
+    if cleaned in ("SL", "LOSS", "STOP", "HIT SL"):
         return {"result": "SL", "actual_r": -1.0}
 
-    # 2. Check simple "+3R", "-1R", "2.5R"
-    simple_match = SIMPLE_R_PATTERN.match(cleaned)
-    if simple_match:
-        val = float(simple_match.group(1))
+    # 2. Check for explicit result + R pattern anywhere in text
+    # e.g., "TP +2R", "TP 2R", "SL -1R", "BE 0R", "HIT TP +3.5R", "RESULT: TP +2R"
+    match_tp_r = re.search(r"(?i)\b(TP|WIN|TARGET)\b\s*([+-]?\d+(?:\.\d+)?)?\s*R?\b", text)
+    match_sl_r = re.search(r"(?i)\b(SL|LOSS|STOP)\b\s*([+-]?\d+(?:\.\d+)?)?\s*R?\b", text)
+    match_be_r = re.search(r"(?i)\b(BE|BREAKEVEN)\b\s*([+-]?\d+(?:\.\d+)?)?\s*R?\b", text)
+
+    # 3. Check for standalone R value like "+2R", "-1R", "+2.5R"
+    match_r_only = re.search(r"(?i)(?:\b|\s)([+-]\d+(?:\.\d+)?)\s*R\b", text)
+
+    if match_tp_r:
+        r_str = match_tp_r.group(2)
+        actual_r = float(r_str) if r_str else 2.0
+        if actual_r < 0:
+            actual_r = abs(actual_r)
+        return {"result": "TP", "actual_r": actual_r}
+
+    if match_sl_r:
+        r_str = match_sl_r.group(2)
+        actual_r = float(r_str) if r_str else -1.0
+        if actual_r > 0:
+            actual_r = -actual_r
+        return {"result": "SL", "actual_r": actual_r}
+
+    if match_be_r:
+        r_str = match_be_r.group(2)
+        actual_r = float(r_str) if r_str else 0.0
+        return {"result": "BE", "actual_r": actual_r}
+
+    if match_r_only:
+        val = float(match_r_only.group(1))
         if val > 0:
             return {"result": "TP", "actual_r": val}
         elif val < 0:
             return {"result": "SL", "actual_r": val}
         else:
             return {"result": "BE", "actual_r": 0.0}
-
-    # 3. Check combined "TP +3R", "SL -1.5R", "BE +0.5R"
-    match = RESULT_REPLY_PATTERN.match(cleaned)
-    if match:
-        res_type = match.group(1)
-        r_val_str = match.group(2)
-
-        if not res_type and not r_val_str:
-            return None
-
-        if res_type in ("BE", "BREAKEVEN"):
-            actual_r = float(r_val_str) if r_val_str else 0.0
-            return {"result": "BE", "actual_r": actual_r}
-
-        if res_type in ("TP", "WIN"):
-            actual_r = float(r_val_str) if r_val_str else 2.0
-            if actual_r < 0:
-                actual_r = abs(actual_r)
-            return {"result": "TP", "actual_r": actual_r}
-
-        if res_type in ("SL", "LOSS"):
-            actual_r = float(r_val_str) if r_val_str else -1.0
-            if actual_r > 0:
-                actual_r = -actual_r
-            return {"result": "SL", "actual_r": actual_r}
-
-        if r_val_str:
-            val = float(r_val_str)
-            if val > 0:
-                return {"result": "TP", "actual_r": val}
-            elif val < 0:
-                return {"result": "SL", "actual_r": val}
-            else:
-                return {"result": "BE", "actual_r": 0.0}
 
     return None
 
