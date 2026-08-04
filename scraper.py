@@ -79,19 +79,41 @@ def fetch_tradingview_events(config: Config) -> List[Dict[str, Any]]:
     parsed_events: List[Dict[str, Any]] = []
 
     watched = set(config.WATCHED_CURRENCIES)
+    country_map = {
+        "US": "USD",
+        "EU": "EUR",
+        "GB": "GBP",
+        "AU": "AUD",
+    }
+
+    # Keywords to filter out minor noise/auctions/survey events
+    NOISE_KEYWORDS = [
+        "auction", "bill", "letras", "ragb", "gilt", "tc ", "purchases",
+        "redbook", "logistics", "car registration", "vehicle sales",
+        "officer survey", "refunding", "optimism index", "job quits",
+        "commodity prices", "household spending", "job ads", "budget balance",
+        "bond", "treasury", "index", "speaks"
+    ]
 
     for item in raw_events:
-        # TradingView importance: 1 = High Impact
+        # TradingView importance: 1 = High Impact (0 = Medium, -1 = Low)
         importance = item.get("importance")
-        if importance != 1:
+        if importance not in (1, "1"):
             continue
 
-        currency = (item.get("currency") or item.get("country") or "").upper()
+        raw_curr = (item.get("currency") or "").upper()
+        raw_country = (item.get("country") or "").upper()
+        currency = raw_curr or country_map.get(raw_country, raw_country)
+
         if currency not in watched:
             continue
 
         title = item.get("title", "").strip()
         if not title:
+            continue
+
+        title_lower = title.lower()
+        if any(nk in title_lower for nk in ["auction", "bill ", "bills", "letras", "ragb", "gilt", "purchases", "redbook", "logistics", "car registration", "vehicle sales", "officer survey", "refunding", "optimism index", "job quits", "job ads", "budget balance"]):
             continue
 
         date_iso = item.get("date")
@@ -107,6 +129,8 @@ def fetch_tradingview_events(config: Config) -> List[Dict[str, Any]]:
 
         forecast = str(item.get("forecast") or "-")
         previous = str(item.get("previous") or "-")
+        actual_raw = item.get("actual")
+        actual = str(actual_raw) if actual_raw is not None and str(actual_raw).strip() != "" else "-"
 
         event_id = f"{currency}_{title}_{timestamp_utc}".replace(" ", "_")
 
@@ -119,6 +143,7 @@ def fetch_tradingview_events(config: Config) -> List[Dict[str, Any]]:
             "event_timestamp": timestamp_utc,
             "forecast": forecast,
             "previous": previous,
+            "actual": actual,
             "time_str": dt.strftime("%H:%M UTC"),
             "date_str": dt.strftime("%Y-%m-%d"),
         })

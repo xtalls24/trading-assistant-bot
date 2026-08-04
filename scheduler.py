@@ -129,7 +129,7 @@ class NewsScheduler:
 
     async def check_news_reminders(self):
         """
-        Checks for upcoming news events and sends H-2 and H-1 reminders.
+        Checks for upcoming news events (H-2, H-1 reminders) and real-time Actual Data Releases.
         """
         target_chat = self.cfg.TARGET_CHAT_ID or self.cfg.BOT_OWNER_ID
         if not target_chat:
@@ -137,9 +137,11 @@ class NewsScheduler:
 
         try:
             now_ts = int(datetime.now(timezone.utc).timestamp())
-            events = self.db.get_news_events(min_timestamp=now_ts)
+            events = self.db.get_news_events()
             if not events:
                 events = await fetch_calendar(self.cfg, self.db)
+
+            pending_actual_check = []
 
             for ev in events:
                 event_id = ev.get("event_id")
@@ -147,7 +149,8 @@ class NewsScheduler:
                 if not event_ts or not event_id:
                     continue
 
-                diff_minutes = (event_ts - now_ts) // 60
+                diff_seconds = event_ts - now_ts
+                diff_minutes = diff_seconds // 60
 
                 # 1. Check H-2 Reminder (110 to 125 minutes window)
                 if 110 <= diff_minutes <= 125:
@@ -160,6 +163,25 @@ class NewsScheduler:
                     if not self.db.is_notification_sent(event_id, "H-1"):
                         await self.send_reminder(target_chat, ev, "H-1 (1 Jam)", diff_minutes)
                         self.db.mark_notification_sent(event_id, "H-1")
+
+                # 3. Collect events that occurred in the last 2 hours and haven't sent ACTUAL notification
+                if 0 <= -diff_seconds <= 7200:
+                    if not self.db.is_notification_sent(event_id, "ACTUAL"):
+                        pending_actual_check.append(ev)
+
+            # If there are events waiting for actual release, fetch fresh data from TradingView API
+            if pending_actual_check:
+                fresh_events = await fetch_calendar(self.cfg, self.db)
+                fresh_dict = {e["event_id"]: e for e in fresh_events if "event_id" in e}
+
+                for ev in pending_actual_check:
+                    event_id = ev.get("event_id")
+                    fresh_ev = fresh_dict.get(event_id) or ev
+                    actual_val = fresh_ev.get("actual")
+
+                    if actual_val and str(actual_val).strip() not in ("-", "", "None"):
+                        await self.send_actual_release_notification(target_chat, fresh_ev)
+                        self.db.mark_notification_sent(event_id, "ACTUAL")
 
         except Exception as e:
             logger.exception(f"Error in check_news_reminders loop: {e}")
@@ -193,3 +215,34 @@ class NewsScheduler:
             logger.info(f"Sent {tag} news reminder for event: {event.get('title')}")
         except Exception as err:
             logger.error(f"Failed to send reminder for {event.get('title')}: {err}")
+
+    async def send_actual_release_notification(self, chat_id: str, event: dict):
+        ts = event.get("timestamp_utc") or event.get("event_timestamp") or 0
+        local_dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(self.tz)
+        day_str = local_dt.strftime("%A, %d %B %Y")
+        time_str = local_dt.strftime("%H:%M WIB")
+
+        title_safe = escape_markdown(event.get("title", ""))
+        actual_val = escape_markdown(str(event.get("actual", "-")))
+        forecast_val = escape_markdown(str(event.get("forecast", "-")))
+        previous_val = escape_markdown(str(event.get("previous", "-")))
+
+        text = (
+            f"📢 *ECONOMIC NEWS ACTUAL DATA RELEASED* 📢\n\n"
+            f"🚩 *Currency:* `{event.get('currency')}`\n"
+            f"📰 *Event:* *{title_safe}*\n"
+            f"🕒 *Waktu Event:* `{day_str}` pukul `{time_str}`\n\n"
+            f"📊 *Actual:* `{actual_val}` 💥\n"
+            f"🎯 *Forecast:* `{forecast_val}`\n"
+            f"📁 *Previous:* `{previous_val}`"
+        )
+
+        try:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="Markdown",
+            )
+            logger.info(f"Sent actual release notification for event: {event.get('title')} (Actual: {actual_val})")
+        except Exception as err:
+            logger.error(f"Failed to send actual release notification for {event.get('title')}: {err}")

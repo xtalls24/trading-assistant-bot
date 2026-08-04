@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -21,19 +21,28 @@ def format_event_card(event: dict, local_dt: datetime) -> str:
     day_str = local_dt.strftime("%A, %d %b %Y")
     time_str = local_dt.strftime("%H:%M WIB")
     now_local = datetime.now(local_dt.tzinfo)
-    minutes_left = max(0, int((local_dt - now_local).total_seconds() // 60))
-    hours = minutes_left // 60
-    mins = minutes_left % 60
-    time_remaining_str = f"{hours} Jam {mins} Menit" if hours > 0 else f"{mins} Menit"
+    minutes_left = int((local_dt - now_local).total_seconds() // 60)
+
+    actual_str = event.get("actual") or "-"
+    actual_line = f"💥 *Actual:* `{actual_str}`\n" if actual_str != "-" else ""
+
+    if minutes_left > 0:
+        hours = minutes_left // 60
+        mins = minutes_left % 60
+        time_remaining_str = f"{hours} Jam {mins} Menit" if hours > 0 else f"{mins} Menit"
+        time_status = f"⏳ *Sisa Waktu:* `{time_remaining_str}`"
+    else:
+        time_status = "✅ *Event Telah Berlangsung*"
 
     return (
         f"🚨 *HIGH IMPACT NEWS EVENT*\n\n"
         f"🚩 *Currency:* `{event.get('currency')}`\n"
         f"📰 *Event:* *{event.get('title')}*\n\n"
         f"🕒 *Waktu:* `{day_str}` - `{time_str}`\n"
+        f"{actual_line}"
         f"📊 *Forecast:* `{event.get('forecast', '-')}`\n"
         f"📈 *Previous:* `{event.get('previous', '-')}`\n\n"
-        f"⏳ *Sisa Waktu:* `{time_remaining_str}`"
+        f"{time_status}"
     )
 
 
@@ -82,7 +91,8 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "🚨 *HIGH IMPACT NEWS HARI INI:*\n\n"
         for local_dt, e in sorted(today_events, key=lambda x: x[0]):
             time_fmt = local_dt.strftime("%H:%M WIB")
-            text += f"• `{time_fmt}` | *{e['currency']}* - {e['title']} (FC: `{e.get('forecast','-')}`)\n"
+            act = f" | Act: `{e.get('actual')}`" if e.get('actual') and e.get('actual') != '-' else ""
+            text += f"• `{time_fmt}` | *{e['currency']}* - {e['title']} (FC: `{e.get('forecast','-')}`{act})\n"
 
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as err:
@@ -107,7 +117,8 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             local_dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz)
             time_fmt = local_dt.strftime("%a %d %b, %H:%M WIB")
-            text += f"• `{time_fmt}` | *{e['currency']}* - {e['title']}\n"
+            act = f" | Act: `{e.get('actual')}`" if e.get('actual') and e.get('actual') != '-' else ""
+            text += f"• `{time_fmt}` | *{e['currency']}* - {e['title']}{act}\n"
 
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as err:

@@ -113,10 +113,21 @@ class Database:
                     event_timestamp INTEGER NOT NULL,
                     forecast TEXT,
                     previous TEXT,
+                    actual TEXT,
                     scraped_at TEXT NOT NULL
                 )
                 """
             )
+
+            # Migration check for news_events table
+            existing_news_cols = [
+                r["name"] for r in c.execute("PRAGMA table_info(news_events)").fetchall()
+            ]
+            if "actual" not in existing_news_cols:
+                try:
+                    c.execute("ALTER TABLE news_events ADD COLUMN actual TEXT")
+                except Exception as e:
+                    logger.warning(f"Could not add column actual to news_events: {e}")
 
             # 4. News Reminders Sent Table (Deduplication)
             c.execute(
@@ -325,8 +336,8 @@ class Database:
                 c.execute(
                     """
                     INSERT OR REPLACE INTO news_events
-                    (event_id, title, currency, impact, event_timestamp, forecast, previous, scraped_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (event_id, title, currency, impact, event_timestamp, forecast, previous, actual, scraped_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         e.get("event_id"),
@@ -336,6 +347,7 @@ class Database:
                         ts,
                         e.get("forecast"),
                         e.get("previous"),
+                        e.get("actual"),
                         now_str,
                     ),
                 )
